@@ -1,0 +1,609 @@
+---
+title: "Assignment - 1"
+format: pdf
+editor: visual
+---
+
+```{r, warning=FALSE, message=FALSE, results='hide'}
+library(tidyverse)
+library(tidyr)
+library(ggplot2)
+library(dplyr)
+library(MASS)
+library(gridExtra)
+library(e1071)
+library(pls)
+```
+
+### 1. Loading the dataset
+
+```{r}
+#Loading the dataset
+data = read.csv("Pressure_Data.csv")
+```
+
+Setting seed with `set.seed()` and taking a random subset of 400 rows with `sample()`.
+
+```{r}
+#set seed for reproducibility
+set.seed(24215882)
+
+#sampling 400 rows
+subset = sample(1:nrow(data), 400)
+data_subset = data[subset,]
+```
+
+### 2. Data cleaning and visualization
+
+```{r}
+#Checking for NA's values
+colSums(as.data.frame(is.na(data_subset)) |>
+  dplyr::select("Mattress_type","Position","Subject","Posture"))
+```
+
+None of these variables have NA values in them.
+So there is no need to remove any records.
+
+We now take a look at the **density plots** for the variables.
+Since we have V1 - V144 variables arranged in the 16 x 9 grid, we choose to plot the variables in groups of 16.
+In total, 9 plots are stored in a list and they are plotted on a 3 x 3 grid using `grid.arrange()`.
+
+```{r}
+generate_density_plots <- function(data) {
+  # Convert the data to long format
+  plot_data <- data |>
+    pivot_longer(cols = starts_with("V"), 
+                 names_to = "V", 
+                 names_prefix = "V",
+                 values_to = "Values")
+
+  # List to store the plots
+  plots <- list()
+  
+  # Loop through the 9 groups (each group contains 16 variables)
+  for(i in 0:8) {
+    # Filtering for each group of 16 variables
+    plt <- plot_data |>
+      filter(V %in% seq((i * 16) + 1, (i + 1) * 16, 1))
+    
+    # Storing the density plots
+    plots[[i + 1]] <- ggplot(data = plt, aes(x = Values, color = V, fill = V)) +
+      geom_density(alpha = 0.2) + 
+      theme_minimal() +
+      theme(legend.position = "none")
+  }
+  
+  return(plots)  # Returning the list of plots
+}
+```
+
+```{r}
+plots = generate_density_plots(data_subset)
+grid.arrange(grobs = plots, ncol = 3)#plots in a 3x3 grid.
+```
+
+Looking at the density plots, we see skewness in a lot of the variables and they are mostly right skewed.
+Using a log transformation, we hope to reduce the skewness for the variables.
+
+We use `log()` to achieve this.
+
+```{r}
+data_subset_log = data_subset
+data_subset_log[,2:145] = log(data_subset[,2:145]) #log transformation
+plots = generate_density_plots(data_subset_log)
+grid.arrange(grobs = plots, ncol = 3)
+```
+
+We see now for many of the variables, the skewness is reduced.
+
+### 3. Hierarchical and k-means clustering
+
+#### **Hierarchical Clustering:**
+
+Let us first do hierarchical clustering to find any structure within the data.
+We pass the variables V1 - V144 to the `dist()` function with the `method = "euclidean"` which computes the dissimilarity matrix.
+This is then passed to `hclust()` with three methods `method = "complete"`, `method = "average"`, and `method = "ward.D"`.
+
+```{r}
+#Hierarchical clustering using other linkage types
+hierarchical_complete = hclust(dist(data_subset_log[,2:145], 
+                           method="euclidean"), method = "complete")
+hierarchical_ward = hclust(dist(data_subset_log[,2:145], 
+                           method="euclidean"), method = "ward.D")
+hierarchical_average = hclust(dist(data_subset_log[,2:145], 
+                           method="euclidean"), method = "average")
+#plotting the dendrograms
+plot(hierarchical_complete, xlab="Complete", sub="")
+plot(hierarchical_ward, xlab="Ward", sub="")
+plot(hierarchical_average, xlab="Average", sub="")
+```
+
+Out of the three (complete, ward and average), from the dendrogram plot, ward linkage seem to be the better linkage type for this dataset followed by complete linkage which both shows 3 difference clusters.
+This could due to the fact that there are three different posture types (left, right and supine).
+Now let us cut the dendogram to form three clusters with `cutree()` with `k = 3`.
+
+```{r}
+#cutree at k = 3
+hcl = cutree(hierarchical_ward, k = 3)
+
+#clustering solution
+table(hcl)
+```
+
+We can also check the agreement of the clustering with the ground truth labels **(Posture values in the dataset)** using the `classAgreement()` function within `e1071` package.
+This takes a contingency table between the clustering solution and the ground truth labels.
+
+```{r}
+cat("The agreement between Hierarchical clustering and the ground truth labels =",
+    classAgreement(table(hcl, data_subset_log$Posture))$rand)
+```
+
+#### **K-Means clustering:**
+
+Now lets take a look at the K-means clustering.
+In order to choose the appropriate K for clustering, we need to take a look at the within group sum of squares (WGSS) for multiple values of K.
+We then plot the WGSS against the K values to see an elbow on the graph and the appropriate K value is found.
+
+We initialize an empty vector `WGSS`.
+Since we wont have a one cluster solution, we have to calculate WGSS manually for k = 1.
+Then we loop from k = 2 to 10 and run the k-means algorithm using the `kmeans()` function to store the WGSS in the vector.
+We then plot the WGSS against the k values to see the elbow.
+
+```{r}
+#empty vector
+WGSS = rep(0,10)
+n = nrow(data_subset_log)
+
+#WGSS for k = 1
+WGSS[1] = (n-1) * sum(apply(data_subset_log[,2:145], 2, var), na.rm = TRUE)
+
+#loop from k = 2 to k = 10
+for(k in 2:10){
+  #sum the within group sum of squares for each k and push it to WGSS
+  WGSS[k] = sum(kmeans(data_subset_log[,2:145], centers = k)$withinss)
+}
+
+WGSS_plot = data.frame(K=seq(1:10), WGSS=WGSS)
+
+ggplot(data = WGSS_plot, aes(x=K,y=WGSS, color = "red")) + 
+  geom_line(linewidth = 1) + theme_minimal() +
+  scale_x_continuous(breaks = seq(1, 10, by = 1))
+```
+
+Looking at the graph, we see a steep decrease till k = 3.
+After k = 3, the decrease in WGSS reduces **(elbow at k = 3).**
+
+We take k = 3 and run the algorithm again to see the clusters.
+
+```{r}
+k = 3 #k means with k = 3
+cl = kmeans(data_subset_log[2:145],center=k)
+table(cl$cluster) #clustering solution
+```
+
+For k = 3, this is our clustering solution.
+Let us check how well the algorithm did by comparing it with the ground truth labels again with the `classAgreement()` function.
+
+```{r}
+cat("The agreement between K-Means clustering and the ground truth labels =",
+    classAgreement(table(cl$cluster, data_subset_log$Posture))$rand)
+```
+
+We can also compare how well our k-means clustering agree with our hierarchical clustering algorithm using the **Rand index**.
+
+```{r}
+#compute the contingency table
+contingency_table = table(cl$cluster, hcl)
+
+#pass the table to classAgreement and look for $rand
+rand_index = classAgreement(contingency_table)$rand
+cat("Agreement between K-means and hierarchical clustering =", rand_index)
+```
+
+The clustering algorithms demonstrate strong agreement, both indicating that three clusters represent the optimal configuration.
+This finding aligns perfectly with the number of posture types present in the dataset.
+
+### 4. LDA + QDA to classify by Posture
+
+Linear discriminant analysis can be done with the `lda()` function.
+Keeping `CV = True` passed as an argument makes the function return results for leave one out cross validation.
+We can then compare the predicted labels to the true labels by looking at the cross tabulation.
+
+```{r}
+#Filtering out other variables
+data_lda = data_subset_log[,2:ncol(data_subset)]
+data_lda = data_lda |>
+  dplyr::select(-Mattress_type, -Position, -Subject, -File)
+
+#LDA with Cross validation.
+lda.res.cv = lda(Posture ~ ., CV = TRUE, data = data_lda)
+```
+
+We can get the accuracy by calculating the number of observations correctly classified (diagonal) divided by the total observations.
+
+```{r}
+cat("The accuracy of LDA =",
+    sum(diag(table(lda.res.cv$class, 
+                   data_lda$Posture))) / sum((table(lda.res.cv$class, 
+                                                    data_lda$Posture))) * 100)
+```
+
+Since the total number of variables (144) is much higher than the amount of data available for the different classes, the covariance matrix cannot be estimated perfectly.
+For this reason, QDA doesn't work unless we get more samples for the classes, or we reduce the dimension of the data.
+
+**LDA Discriminant function:**
+
+$\delta_k(x) = x^T\sum^{-1}\mu_k - \frac{1}{2}\mu_k^T\sum^{-1}\mu_k + log \pi_k$
+
+**QDA Discriminant function:**
+
+$\delta_k(x) = -\frac{1}{2}log|\sum_k| - \frac{1}{2}(x-\mu_k)^T\sum_K^{-1}(x-\mu_k) + log\pi_k$
+
+QDA requires a separate covariance matrix for each class.
+Even if the covariance matrix can be estimated, often they are not invertible.
+We can check this by checking the determinant of the covariance matrix.
+
+```{r}
+data_lda_left = data_lda |>
+  filter(Posture == "Left")
+det(cov(data_lda_left[1:144]))
+```
+
+We get determinant = 0 for the covariance matrix of the left class in our dataset.
+This means that the covariance matrix inverse is not defined.
+And hence, QDA doesn't work.
+
+### 5. PCA
+
+We can use `prcomp()` to fit the PCA model with `scale. = TRUE`.
+The standard deviations are returned from the result of the `prcomp()` function.
+This can be accessed via the `$sdev` property and to get the variance we just have to square it.
+We can store the cumulative proportion of variance by taking the cumulative sum of the variances and dividing it by the total sum.
+This is stored in a vector `cummulative_percentage` which is used for plotting.
+
+```{r}
+#PCA
+fit = prcomp(data_subset_log[,2:145], scale. = TRUE)
+
+#Dataframe storing cummulative percentage of variance explained.
+cummulative_percentage = 
+  data.frame(Components = seq(1:144),
+             Proportion_of_Variance = cumsum(fit$sdev^2)/sum(fit$sdev^2)
+             )
+
+#plotting the cummulative variances vs components used.
+ggplot(data = cummulative_percentage, aes(x=Components,y=Proportion_of_Variance)) + 
+  geom_line(linewidth=0.75) + 
+  geom_hline(yintercept = 0.9, color="Red", linetype = 2) +
+  labs(title = "Cummulative proportion of variance explained",
+       x = "Number of Principal components",
+       y = "Proportion of variance explained")
+```
+
+After PCA, the first few principal components explained the most variances.
+The red dotted line marks the point where variance explained is **90%**.
+
+```{r}
+#returns index at whice the variance explained in greater than 90%.
+which(cummulative_percentage$Proportion_of_Variance > 0.9)[1]
+```
+
+The analysis reveals that **40 principal components** are required to explain **more than 90% of the variance** in the dataset.
+This indicates that, although the original dataset comprises **144 variables (V1–V144)**, a significantly smaller subset of **40 principal components** is sufficient to capture the majority of the data's variability.
+
+#### Interpretation for the first two principal components:
+
+Below is the scatter plot between PC1 and PC2.
+
+```{r}
+#the first two PCs.
+pcs = cbind(as.data.frame(fit$x[,1:2]), 
+            Posture = data_subset_log$Posture)
+
+ggplot(data=pcs, aes(x=PC1,y=PC2, colour = data_subset_log$Posture)) + 
+  geom_point() +
+  labs(color = "Posture")
+```
+
+The plot reveals distinct patterns in the data.
+The Left posture (red points) is clearly separated from the Right posture (green points), while Supine (blue points) is clustered in the middle, overlapping with both.
+
+This suggests that **PC1** primarily differentiates posture types, strongly separating Left and Right, while Supine shares characteristics with both.
+
+On the other hand, **PC2** may represent weight distribution across different sleeping postures.
+In Left and Right postures, weight is concentrated in a smaller area, whereas in Supine, it is more evenly spread out, resulting in lower PC2 values.
+
+### 6. Decision boundary
+
+The below functions takes in a model (LDA, QDA, KNN etc.), data used for the model and plots the decision boundaries.
+
+```{r}
+boundary <- function(model, data, class = NULL, predict_type = "class",
+                     resolution = 100, showgrid = TRUE, ...) {
+
+  if(!is.null(class)) cl <- data[,class] else cl <- 1
+  data <- data[,1:2]
+  k <- length(unique(cl))
+
+  plot(data, col = as.integer(cl)+1L, pch = as.integer(cl)+1L, ...)
+  
+  # make grid
+  r <- sapply(data, range, na.rm = TRUE)
+  xs <- seq(r[1,1], r[2,1], length.out = resolution)
+  ys <- seq(r[1,2], r[2,2], length.out = resolution)
+  g <- cbind(rep(xs, each=resolution), rep(ys, time = resolution))
+  colnames(g) <- colnames(r)
+  g <- as.data.frame(g)
+
+  ### guess how to get class labels from predict
+  ### (unfortunately not very consistent between models)
+  p <- predict(model, g, type = predict_type)
+  if(is.list(p)) p <- p$class
+  p <- as.factor(p)
+
+  if(showgrid) points(g, col = as.integer(p)+1L, pch = ".")
+
+  z <- matrix(as.integer(p), nrow = resolution, byrow = TRUE)
+  contour(xs, ys, z, add = TRUE, drawlabels = FALSE,
+    lwd = 2, levels = (1:(k-1))+.5)
+
+  invisible(z)
+
+}
+```
+
+```{r}
+#making changes to the data matrix to make it compatible with the function.
+row.names(pcs) = seq(1:nrow(pcs))
+pcs = data.frame(pcs)
+pcs$Posture <- factor(pcs$Posture, 
+                      levels = c("Supine","Left","Right"), 
+                      labels=c(1,2,3))
+```
+
+We fit a new LDA model using the first two PCs, PC1 and PC2 using `lda()` and using the `boundary()` function we plot the decision boundaries.
+
+```{r}
+#New LDA model for the first two PCS.
+lda.res.cv = lda(Posture ~ ., data = pcs)
+#Plot the boundaries
+boundary(lda.res.cv, pcs, class = "Posture", main="LDA")
+```
+
+### 7. LDA + QDA to classify by Subject
+
+We first reduce the dimension of the dataset by choosing the first 40 PCs.
+We create a new dataframe with the PC information along with the Subject labels.
+We then fit a LDA and a QDA model to see the classification rates.
+
+```{r}
+#picking the first 36 pcs along with the subject labels
+pca_reduced = data.frame(fit$x[,1:40], Subject = data_subset_log$Subject)
+#fitting a LDA model
+lda.res.cv.new = lda(Subject ~ ., data = pca_reduced, CV = TRUE)
+#fitting a QDA model
+qda.res.cv = qda(Subject ~ ., data = pca_reduced, CV = TRUE)
+#accuracy for LDA
+cat("Classification rate of LDA =",
+    sum(diag(table(lda.res.cv.new$class, 
+                   pca_reduced$Subject))) / sum((table(lda.res.cv.new$class, 
+                                                    pca_reduced$Subject))) * 100, "%\n")
+#accuracy for QDA
+cat("Classification rate of QDA =",
+    sum(diag(table(qda.res.cv$class, 
+                   pca_reduced$Subject))) / sum((table(qda.res.cv$class, 
+                                                    pca_reduced$Subject))) * 100, "%")
+```
+
+**LDA** performs better with an classification rate of **53.25%** compared to **QDA** with **39.25%** when **40** principal components are chosen.
+
+#### Covariance matrix or Correlation matrix:
+
+Since we standardized the data before performing PCA, we are using the **correlation matrix** to compute the principal components (PCs).
+Standardizing the data forces all variables to have a variance of 1, which results in the covariance matrix becoming a **correlation matrix**.
+
+We can take a look at the minimum and maximum variances for the input variables.
+
+```{r}
+min(apply(data_subset_log[,2:145], 2 ,var))
+max(apply(data_subset_log[,2:145], 2 ,var))
+```
+
+Why did we standardize even though the variables have comparable variances?
+This is due to the fact that we use the standardized PCs for the LDA and QDA models which assume normality for the variables and standardization might help in normality of the input variables.
+We can compare the performance of LDA and QDA models without scaling the data before PCA.
+
+```{r}
+fit_unscaled = prcomp(data_subset_log[,2:145])
+pca_reduced = data.frame(fit_unscaled$x[,1:40], Subject = data_subset_log$Subject)
+#fitting a LDA model
+lda.res.cv.new = lda(Subject ~ ., data = pca_reduced, CV = TRUE)
+#fitting a QDA model
+qda.res.cv = qda(Subject ~ ., data = pca_reduced, CV = TRUE)
+#accuracy for LDA
+cat("Classification rate of LDA =",
+    sum(diag(table(lda.res.cv.new$class, 
+                   pca_reduced$Subject))) / 
+      sum((table(lda.res.cv.new$class, 
+                 pca_reduced$Subject))) * 100, "%\n")
+#accuracy for QDA
+cat("Classification rate of QDA =",
+    sum(diag(table(qda.res.cv$class, 
+                   pca_reduced$Subject))) / sum((table(qda.res.cv$class, 
+                                                    pca_reduced$Subject))) * 100, "%")
+```
+
+Although the difference is not big, the scaled PCs performed better.
+
+### 8. Principal component regression (PCR) synopsis
+
+#### **Purpose:**
+
+Principal Component Regression (PCR) is a technique designed to handle datasets where predictor variables are highly correlated.
+In traditional linear regression, multicollinearity can lead to unstable predictions and overfitting.
+PCR addresses this issue by transforming the original predictors into a new set of uncorrelated principal components while retaining the most informative variance in the data.
+
+#### **How the method works:**
+
+PCR has two main steps:
+
+1.  Principal component regression (PCR) involves performing principal component analysis to construct the principal components.
+
+2.  This is followed by using these principal components as predictor variables for a linear regression model.
+    Often, a smaller number of principal components are enough to explain around 80% -95% of the data variance.
+
+Suppose we have $P$ predictors $X1, X2,...,X_P$.
+After performing PCA, we get the $P$ principal components $PC1, PC2,...,PC_P$.
+We pick the first $M$ principal components which explain around 80% - 95% total variance in the data.
+We can then use these first $M$ principal components as the new predictors $Z1, Z2,...,Z_M$ for the linear regression model.
+
+1.  **Number of principal components:** We need to choose the appropriate number of principal components to retain.
+    Too few principal component may lead to underfitting, while retaining too many will make the model unnecessarily complex.
+
+2.  **Scaling:** We need to choose whether to scale the data or not.
+    If all the predictors are measured on the same scale we can choose not to scale the data.
+    Scaling is necessary when predictors are measured in different units and scales.
+    When this is the case, standardizing by subtracting the mean and dividing by the variance is recommended.
+
+#### Advantages and disadvantages:
+
+**Advantages:**
+
+-   Handles Multicollinearity
+
+-   Reduces Overfitting
+
+-   Reduces dimensions without loosing much of the variability
+
+**Disadvantages:**
+
+-   Loss of interpretability
+
+-   Computational Complexity
+
+-   Potential Loss of Important Information
+
+### 9. PCR
+
+Let's now load the subject info using `read.csv()` and calculate the BMI using the formula:
+
+$\frac{Weight(KG)}{Height^2(m^2)}$
+
+We convert the height from cm to m before calculating the BMI.
+We then merge with original pressure dataset by using `left_join()`.
+
+```{r}
+#load the subject info data
+subject_info = read.csv("Subject_Info_Data.csv")
+
+#calculate BMI
+subject_info["BMI"] = subject_info["Weight.kg"] / (subject_info["Height.cm"] ^ 2) * 10000
+subject_info = subject_info |>
+  rename(Subject = Subject.Number)
+
+subject_info = subject_info |>
+  mutate(Subject = paste0("S",as.character(Subject)))
+
+#merge with original dataset
+merged_data = data_subset_log |>
+  left_join(subject_info |> dplyr::select(Subject, BMI), by = "Subject")
+```
+
+Now that we have the data, we do `set.seed()` for reproducibility and split the data into train and test sets using `sample()`.
+We then exclude the unnecessary field using `dplyr::select()`.
+
+```{r}
+#splitting train and test samples
+set.seed(24215882)
+N = nrow(merged_data)
+test_N = N * 0.2
+train_N = N - test_N
+
+test_data_indexes = sample(1:400, test_N)
+
+test_data = merged_data[test_data_indexes,]
+test_data = test_data |>
+  dplyr::select(-Mattress_type, -Position, -Subject, -Posture, -X, -File)
+
+x_test = test_data |>
+  dplyr::select(-BMI)
+y_test = test_data["BMI"]
+
+training_data = merged_data[-test_data_indexes,]
+training_data = training_data |>
+  dplyr::select(-Mattress_type, -Position, -Subject, -Posture, -X, -File)
+```
+
+We now perform PCR using `pcr()` function with `validation = "CV"`.
+`scale = TRUE` is not required here since all the pressure measurements are of the same scale.
+
+```{r}
+pcr.fit = pcr(BMI  ~ ., data = training_data, validation = "CV")
+```
+
+`pcr.fit$validation$press` returns the cross validation residual sum of squares for different number of principal components chosen.
+We can find the minimum residual sum of squares and chose this as the optimal number of components using `which.min()` function.
+
+We then call `predict()` with `newdata = x_test` and with the previously found optimal components.
+This returns the predicts BMIs for the test dataset.
+We then evaluate the model performance using the $R^2$ statistic which is given by:
+
+$R^2 = 1 - \frac{SSE}{SST}$
+
+```{r}
+optimal_ncomp = which.min(pcr.fit$validation$PRESS) #optimal components
+
+#prediction for test data
+pcr.pred = predict(pcr.fit, newdata = x_test, ncomp = optimal_ncomp) 
+
+#R2 calculation
+sse = sum((y_test$BMI - as.numeric(pcr.pred))^2)
+sst = sum((y_test$BMI - mean(y_test$BMI))^2)
+r_squared = 1 - (sse / sst)
+cat("R2 value =",r_squared)
+```
+
+The PCR model's low $R^2$ value may be attributed to the variation in pressure measurements for the same subjects.
+For instance, Subject S1 has separate records for left, right, and supine postures, yet their BMI remains constant across all entries.
+This inconsistency makes it challenging for the model to establish a meaningful regression relationship.
+
+To address this, we can filter the dataset to include only one posture type, ensuring that the pressure measurements remain consistent for each subject.
+Training the model on this refined dataset may yield more reliable results.
+
+We use `filter()` to filter out the supine posture records.
+
+```{r}
+merged_data_supine = merged_data |>
+  filter(Posture == "Supine") |>
+  dplyr::select(-X, -File, -Position, -Subject, -Posture, -Mattress_type)
+```
+
+We now do the same process as before to see the $R^2$ value.
+
+```{r}
+set.seed(24215882)
+train_n = nrow(merged_data_supine) * 0.8
+
+train_samples = sample(1:nrow(merged_data_supine), train_n)
+test_samples = setdiff(1:nrow(merged_data_supine), train_samples)
+
+train_data = merged_data_supine[train_samples,]
+test_data = merged_data_supine[-train_samples,]
+
+x_test = test_data |>
+  dplyr::select(-BMI)
+y_test = test_data["BMI"]
+
+
+pcr.fit = pcr(BMI  ~ ., data = train_data, validation = "CV")
+
+optimal_ncomp = which.min(pcr.fit$validation$PRESS)
+pcr.pred = predict(pcr.fit, x_test, ncomp = optimal_ncomp)
+sse = sum((y_test$BMI - as.numeric(pcr.pred))^2)
+sst = sum((y_test$BMI - mean(y_test$BMI))^2)
+r_squared = 1 - (sse / sst)
+cat("R2 value =", r_squared)
+```
+
+We now get $R^2$ value much higher than the we got for the previous model.
+This means that this model has established a better relationship between the pressure measurements and the BMI since the measurements are consistent for each subject.
